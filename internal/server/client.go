@@ -23,27 +23,41 @@ type Client struct {
 	// Assigned once the client is placed into a room.
 	id   game.PlayerID
 	room *Room
+
+	// done is closed once when the client is tearing down. We signal shutdown
+	// this way and never close `send`: the room loop may still hold a reference
+	// to this client and call enqueue, and sending on a closed channel panics.
+	done chan struct{}
 }
 
 // NewClient wraps an upgraded connection.
 func NewClient(conn *ws.Conn) *Client {
-	return &Client{conn: conn, send: make(chan []byte, sendQueue)}
+	return &Client{conn: conn, send: make(chan []byte, sendQueue), done: make(chan struct{})}
 }
 
 // enqueue tries to queue an outbound message without blocking the caller (the
 // room loop). A full queue means a slow client; we drop the message for it.
+// Because `send` is never closed, this can never panic even if the client has
+// already disconnected — at worst the message is dropped.
 func (c *Client) enqueue(b []byte) {
 	select {
 	case c.send <- b:
+	case <-c.done:
+		// client gone; drop
 	default:
 		// slow consumer: drop this snapshot
 	}
 }
 
-// writePump drains the send channel to the socket until the channel is closed.
+// writePump drains the send channel to the socket until the client is torn down.
 func (c *Client) writePump() {
-	for b := range c.send {
-		if err := c.conn.WriteMessage(b); err != nil {
+	for {
+		select {
+		case b := <-c.send:
+			if err := c.conn.WriteMessage(b); err != nil {
+				return
+			}
+		case <-c.done:
 			return
 		}
 	}
@@ -57,7 +71,7 @@ func (c *Client) run(hub *Hub) {
 		if c.room != nil {
 			c.room.Leave(c.id)
 		}
-		close(c.send)
+		close(c.done) // stop writePump; never close(send) — the room may still enqueue
 		c.conn.Close()
 	}()
 
