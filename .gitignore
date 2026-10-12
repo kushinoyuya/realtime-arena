@@ -1,0 +1,13 @@
+# build output
+/bin/
+*.exe
+
+# test / coverage artifacts
+coverage.out
+*.test
+*.out
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
