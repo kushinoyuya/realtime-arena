@@ -29,6 +29,33 @@ things a real-time game *backend* is made of:
        many bots ──▶ cmd/loadtest ──▶ p50/p99 latency, throughput
 ```
 
+## Demo
+
+![Realtime Arena demo](docs/demo.gif)
+
+Four bots chasing food in a shared arena. This GIF is **rendered from the real
+simulation** (`cmd/gifgen` runs the same `internal/game` engine headlessly and
+paints each tick), not a screen capture — so it is deterministic and
+reproducible from a seed.
+
+## What it does, in plain terms
+
+- You open the page in a browser and control a snake with the arrow keys.
+- Your browser sends only *"I pressed up"* to the server — never your position.
+- The **server** is the referee: every ~100 ms it moves all snakes, checks who
+  ate food, who hit a wall or another snake, and sends everyone the new picture
+  of the board (a "snapshot").
+- Because only the server decides what happens, no player can cheat by lying
+  about where they are. The browser just draws whatever the server reports.
+- Many players share rooms (matchmaking); if your connection drops you can
+  rejoin the same snake for a few seconds; when everyone dies a new round
+  starts.
+- A separate tool (`cmd/loadtest`) pretends to be hundreds of players at once so
+  you can see how the server holds up and how fast it responds.
+
+That small loop — *clients send intent, the authoritative server simulates and
+broadcasts* — is the backbone of real online multiplayer games.
+
 ## Quick start
 
 Requires Go (1.13+). No `npm`, no modules to download.
@@ -91,6 +118,7 @@ scaled-down version of the pre-launch load testing a game-services team does.
 cmd/
   server/     HTTP + WebSocket server; serves the client, ticks the rooms
   loadtest/   concurrent bot-client load generator
+  gifgen/     renders a demo match to docs/demo.gif via the game engine
 internal/
   game/       pure deterministic simulation + replay (no I/O)  ← most tests
   protocol/   JSON messages shared by client and server
