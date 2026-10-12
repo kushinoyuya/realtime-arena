@@ -21,6 +21,13 @@ type Room struct {
 	count    int32
 	seedStep int64
 
+	// Instrumentation (set by the hub; may be nil in isolated unit tests).
+	metrics *appMetrics
+
+	// chaosTickMs injects artificial per-tick latency for incident drills
+	// (see docs/RUNBOOK.md). 0 = disabled.
+	chaosTickMs int
+
 	// Inbound channels into the loop goroutine.
 	joinCh   chan joinReq
 	rejoinCh chan rejoinReq
@@ -125,6 +132,15 @@ func (r *Room) loop() {
 // tick advances the authoritative simulation by one step and broadcasts the
 // result. This is the only place the world changes.
 func (r *Room) tick() {
+	start := time.Now()
+	defer func() { r.metrics.observeTick(time.Since(start).Seconds()) }()
+
+	if r.chaosTickMs > 0 {
+		// Injected fault: makes ticks breach the latency budget so an operator
+		// can watch arena_slow_ticks_total rise and the SLO burn. Drill only.
+		time.Sleep(time.Duration(r.chaosTickMs) * time.Millisecond)
+	}
+
 	// Reap players whose grace period has expired.
 	var reaped []game.PlayerID
 	for id, since := range r.offlineSince {
@@ -205,10 +221,15 @@ func (r *Room) broadcast() {
 		Food:         r.world.Food,
 	}
 	b := protocol.MustEncode(snap)
+	sent := 0
 	for _, id := range sortedClientIDs(r.clients) {
 		if c := r.clients[id]; c != nil {
 			c.enqueue(b)
+			sent++
 		}
+	}
+	if r.metrics != nil && sent > 0 {
+		r.metrics.snapshots.Add(uint64(sent))
 	}
 }
 
@@ -251,6 +272,9 @@ func (r *Room) Input(id game.PlayerID, dir game.Dir) {
 	}
 	select {
 	case r.inputCh <- inputReq{id: id, dir: dir}:
+		if r.metrics != nil {
+			r.metrics.inputs.Inc()
+		}
 	case <-r.quit:
 	default:
 		// input buffer full under extreme load: drop (next input supersedes it)

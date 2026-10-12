@@ -19,18 +19,25 @@ func main() {
 	tickRate := flag.Int("tick", 10, "simulation ticks per second")
 	width := flag.Int("w", 40, "arena width in cells")
 	height := flag.Int("h", 30, "arena height in cells")
+	chaosTickMs := flag.Int("chaos-tick-ms", 0, "inject N ms of latency per tick (incident drill; 0 = off)")
 	flag.Parse()
 
 	hub := server.NewHub(server.HubConfig{
-		Capacity: *capacity,
-		Width:    *width,
-		Height:   *height,
-		TickRate: *tickRate,
+		Capacity:    *capacity,
+		Width:       *width,
+		Height:      *height,
+		TickRate:    *tickRate,
+		ChaosTickMs: *chaosTickMs,
 	})
+	if *chaosTickMs > 0 {
+		log.Printf("CHAOS MODE: injecting %dms latency per tick", *chaosTickMs)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", hub.ServeWS)
 	mux.HandleFunc("/stats", hub.ServeStats)
+	mux.HandleFunc("/metrics", hub.ServeMetrics) // Prometheus exposition
+	mux.HandleFunc("/slo", hub.ServeSLO)         // live tick-latency SLO
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))

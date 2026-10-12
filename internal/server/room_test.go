@@ -13,7 +13,31 @@ import (
 // where the test can read them. This lets us exercise the full room goroutine
 // (tick loop, broadcast, matchmaking, reconnection) without opening a port,
 // which the sandbox forbids anyway.
-func fakeClient() *Client { return &Client{send: make(chan []byte, 512)} }
+func fakeClient() *Client {
+	return &Client{send: make(chan []byte, 512), done: make(chan struct{})}
+}
+
+// TestEnqueueAfterDisconnectDoesNotPanic is a regression test for a
+// "send on closed channel" panic: the room loop could call enqueue on a client
+// that had just disconnected. enqueue must stay panic-free and non-blocking even
+// after the client is done and its buffer is full.
+func TestEnqueueAfterDisconnectDoesNotPanic(t *testing.T) {
+	c := fakeClient()
+	close(c.done) // simulate the client tearing down
+
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 10000; i++ {
+			c.enqueue([]byte("x")) // must never panic or block
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("enqueue blocked after client disconnect")
+	}
+}
 
 func fastCfg() game.Config {
 	c := game.DefaultConfig(1)
