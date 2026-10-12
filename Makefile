@@ -1,4 +1,4 @@
-.PHONY: all build test race vet fmt cover run loadtest clean
+.PHONY: all build test race vet fmt cover run loadtest gif clean
 
 all: vet test build
 
@@ -28,6 +28,10 @@ run:
 # Example: make loadtest ARGS="-n 500 -dur 15s"
 loadtest:
 	go run ./cmd/loadtest $(ARGS)
+
+# Regenerate the README demo GIF from the engine (deterministic).
+gif:
+	go run ./cmd/gifgen -out docs/demo.gif
 
 clean:
 	rm -rf bin coverage.out
