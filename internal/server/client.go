@@ -2,6 +2,7 @@ package server
 
 import (
 	"log"
+	"time"
 
 	"github.com/kushino/realtime-arena/internal/game"
 	"github.com/kushino/realtime-arena/internal/protocol"
@@ -12,6 +13,15 @@ import (
 // if a client cannot keep up we drop snapshots for it rather than stalling the
 // whole room (see Room.broadcast).
 const sendQueue = 32
+
+// Liveness: the server pings every pingPeriod and drops a peer that sends
+// nothing (not even a pong) for readTimeout. Without this a half-open TCP
+// connection would hold its room slot forever.
+const (
+	pingPeriod   = 10 * time.Second
+	readTimeout  = 2 * pingPeriod
+	writeTimeout = 5 * time.Second
+)
 
 // Client is one connected player. The read side runs in Client.run; the write
 // side runs in writePump. The room owns all game state and pushes bytes to this
@@ -49,15 +59,26 @@ func (c *Client) enqueue(b []byte) {
 	}
 }
 
-// writePump drains the send channel to the socket until the client is torn down.
+// writePump drains the send channel to the socket and sends keepalive pings
+// until the client is torn down. A failed write closes the socket so the read
+// loop in run unblocks and performs the normal cleanup.
 func (c *Client) writePump() {
+	ping := time.NewTicker(pingPeriod)
+	defer ping.Stop()
 	for {
+		var err error
 		select {
 		case b := <-c.send:
-			if err := c.conn.WriteMessage(b); err != nil {
-				return
-			}
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			err = c.conn.WriteMessage(b)
+		case <-ping.C:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			err = c.conn.Ping()
 		case <-c.done:
+			return
+		}
+		if err != nil {
+			c.conn.Close()
 			return
 		}
 	}
@@ -66,10 +87,11 @@ func (c *Client) writePump() {
 // run handles the full client lifecycle: handshake (join/rejoin), then the
 // input loop, then cleanup on disconnect. It blocks until the connection ends.
 func (c *Client) run(hub *Hub) {
+	c.conn.SetReadTimeout(readTimeout)
 	go c.writePump()
 	defer func() {
 		if c.room != nil {
-			c.room.Leave(c.id)
+			c.room.Leave(c.id, c)
 		}
 		close(c.done) // stop writePump; never close(send) — the room may still enqueue
 		c.conn.Close()

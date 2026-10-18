@@ -138,7 +138,7 @@ func TestReconnectWithinGrace(t *testing.T) {
 	_ = readSnapshots(c, 40*time.Millisecond)
 
 	// Simulate a dropped connection.
-	r.Leave(id)
+	r.Leave(id, c)
 	time.Sleep(30 * time.Millisecond)
 
 	// Within the grace period the slot must still be reclaimable.
@@ -171,5 +171,28 @@ func TestRejoinUnknownTokenFails(t *testing.T) {
 	hub := NewHub(HubConfig{TickRate: 100})
 	if _, _, err := hub.Rejoin(fakeClient(), "does-not-exist"); err == nil {
 		t.Fatal("expected error for unknown token")
+	}
+}
+
+// TestStaleLeaveAfterRejoinKeepsNewClient is a regression test: a client whose
+// network dropped can rejoin on a new connection before the server notices the
+// old one is dead. When the old connection's disconnect finally arrives, it
+// must not mark the slot offline — the new connection owns it now.
+func TestStaleLeaveAfterRejoinKeepsNewClient(t *testing.T) {
+	r := newRoom(0, fastCfg())
+	oldConn := fakeClient()
+	id := r.addPlayer(oldConn, "p1")
+	_ = readSnapshots(oldConn, 40*time.Millisecond)
+
+	newConn := fakeClient()
+	if !r.reattach(newConn, id) {
+		t.Fatal("reattach failed")
+	}
+	r.Leave(id, oldConn) // late disconnect of the superseded connection
+	time.Sleep(30 * time.Millisecond)
+
+	_ = readSnapshots(newConn, 20*time.Millisecond) // drain pre-Leave snapshots
+	if got := readSnapshots(newConn, 100*time.Millisecond); len(got) == 0 {
+		t.Fatal("stale Leave knocked the rejoined connection offline")
 	}
 }
