@@ -7,6 +7,7 @@ import (
 
 	"github.com/kushino/realtime-arena/internal/game"
 	"github.com/kushino/realtime-arena/internal/protocol"
+	"github.com/kushino/realtime-arena/internal/replay"
 )
 
 // A Room is one match. All game state lives here and is owned by a single
@@ -28,6 +29,11 @@ type Room struct {
 	// (see docs/RUNBOOK.md). 0 = disabled.
 	chaosTickMs int
 
+	// onRoundEnd receives each finished round (every snake dead). It is called
+	// from the loop goroutine, so it must not block; the hub hands the record
+	// off to the replay store asynchronously. nil = recording disabled.
+	onRoundEnd func(replay.Record)
+
 	// Inbound channels into the loop goroutine.
 	joinCh   chan joinReq
 	rejoinCh chan rejoinReq
@@ -46,6 +52,7 @@ type Room struct {
 	pendingLeaves []game.PlayerID
 	pendingDirs   map[game.PlayerID]game.Dir
 	graceTicks    int
+	roundSaved    bool // the current all-dead state has already been recorded
 }
 
 type joinReq struct {
@@ -182,6 +189,8 @@ func (r *Room) tick() {
 	r.pendingLeaves = nil
 	r.pendingDirs = make(map[game.PlayerID]game.Dir)
 
+	r.recordRoundEnd()
+
 	// If everyone is dead but players are still connected, start a fresh round.
 	if r.world.AliveCount() == 0 && r.onlineCount() > 0 {
 		r.restart()
@@ -190,12 +199,28 @@ func (r *Room) tick() {
 	r.broadcast()
 }
 
+// recordRoundEnd hands the replay to onRoundEnd the first tick on which every
+// snake is dead. NewRecord copies what it needs, so the room keeps owning (and
+// may keep appending to) r.replay.
+func (r *Room) recordRoundEnd() {
+	if r.world.AliveCount() > 0 {
+		r.roundSaved = false // someone joined a dead board: a new ending is coming
+		return
+	}
+	if r.roundSaved || len(r.world.Snakes) == 0 || r.onRoundEnd == nil {
+		return
+	}
+	r.roundSaved = true
+	r.onRoundEnd(replay.NewRecord(r.id, r.replay, r.world, time.Now()))
+}
+
 // restart begins a new round with a new seed, re-joining everyone still online.
 func (r *Room) restart() {
 	r.seedStep++
 	r.cfg.Seed = r.cfg.Seed*6364136223846793005 + 1442695040888963407 + r.seedStep
 	r.world = game.NewWorld(r.cfg)
 	r.replay = game.NewReplay(r.cfg)
+	r.roundSaved = false
 
 	ids := make([]game.PlayerID, 0, len(r.clients))
 	for id, c := range r.clients {
