@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Realtime Arena · Replays</title>
+<link rel="stylesheet" href="style.css" />
+<style>
+  .list { max-height: 420px; overflow-y: auto; min-width: 240px; }
+  .match {
+    display: block; width: 100%; text-align: left; cursor: pointer;
+    background: none; border: 1px solid transparent; border-radius: 6px;
+    color: var(--text); font: inherit; padding: 6px 8px; margin-bottom: 4px;
+  }
+  .match:hover { border-color: #2b3744; }
+  .match.active { border-color: var(--accent); }
+  .match .when { color: var(--muted); font-size: 12px; }
+  .controls { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+  .controls button, .controls select {
+    background: var(--grid); color: var(--text); border: 1px solid #2b3744;
+    border-radius: 4px; padding: 3px 10px; font: inherit; cursor: pointer;
+  }
+  .controls input[type=range] { flex: 1; min-width: 160px; accent-color: var(--accent); }
+  .tick { color: var(--muted); font-size: 12px; min-width: 90px; font-variant-numeric: tabular-nums; }
+  .badge { font-size: 12px; padding: 1px 8px; border-radius: 10px; }
+  .badge.ok { color: var(--accent); border: 1px solid var(--accent); }
+  .badge.bad { color: #f07178; border: 1px solid #f07178; }
+  .facts { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+  <h1>Replays</h1>
+  <div class="sub">each match is stored as seed + inputs, and re-simulated by the server to play back</div>
+  <div class="wrap">
+    <div>
+      <canvas id="board" width="720" height="540"></canvas>
+      <div class="controls">
+        <button id="play" disabled>Play</button>
+        <button id="back" title="previous tick (←)" disabled>‹</button>
+        <button id="fwd" title="next tick (→)" disabled>›</button>
+        <input id="seek" type="range" min="0" max="0" value="0" disabled />
+        <span id="tick" class="tick">–</span>
+        <select id="speed" title="playback speed">
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+          <option value="4">4×</option>
+        </select>
+      </div>
+      <div id="facts" class="facts"></div>
+    </div>
+    <div class="panel">
+      <h2>Recorded matches</h2>
+      <div id="matches" class="list"><div class="score" style="color:#8b98a5">loading…</div></div>
+      <h2 style="margin-top:14px">Scoreboard</h2>
+      <div id="scores"></div>
+      <div class="hint">Space: play/pause · ←/→: step<br><a href="/">← back to the live arena</a></div>
+    </div>
+  </div>
+  <script type="module" src="replay.js"></script>
+</body>
+</html>

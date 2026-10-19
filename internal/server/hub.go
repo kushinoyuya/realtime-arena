@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kushino/realtime-arena/internal/game"
+	"github.com/kushino/realtime-arena/internal/replay"
 	"github.com/kushino/realtime-arena/internal/ws"
 )
 
@@ -29,6 +30,7 @@ type Hub struct {
 	height      int
 	tickRate    int
 	chaosTickMs int
+	replays     *replay.Store
 	metrics     *appMetrics
 }
 
@@ -43,7 +45,8 @@ type HubConfig struct {
 	Width       int
 	Height      int
 	TickRate    int
-	ChaosTickMs int // injected per-tick latency for incident drills (0 = off)
+	ChaosTickMs int           // injected per-tick latency for incident drills (0 = off)
+	Replays     *replay.Store // where finished rounds are recorded (nil = off)
 }
 
 // NewHub creates an empty hub. Zero-valued config fields fall back to defaults.
@@ -68,6 +71,7 @@ func NewHub(cfg HubConfig) *Hub {
 		height:      cfg.Height,
 		tickRate:    cfg.TickRate,
 		chaosTickMs: cfg.ChaosTickMs,
+		replays:     cfg.Replays,
 		metrics:     newAppMetrics(),
 	}
 }
@@ -90,6 +94,9 @@ func (h *Hub) Join(c *Client, name string) (*Room, game.PlayerID, string) {
 		room = newRoom(h.nextRoomID, cfg)
 		room.metrics = h.metrics
 		room.chaosTickMs = h.chaosTickMs
+		if h.replays != nil {
+			room.onRoundEnd = h.saveReplay
+		}
 		h.nextRoomID++
 		h.rooms = append(h.rooms, room)
 	}
@@ -119,6 +126,16 @@ func (h *Hub) Rejoin(c *Client, token string) (*Room, game.PlayerID, error) {
 		return nil, 0, errors.New("slot expired")
 	}
 	return info.room, info.id, nil
+}
+
+// saveReplay stores a finished round off the room's tick loop, so a slow disk
+// can never stall the simulation.
+func (h *Hub) saveReplay(rec replay.Record) {
+	go func() {
+		if _, err := h.replays.Add(rec); err != nil {
+			log.Printf("replay: save failed: %v", err)
+		}
+	}()
 }
 
 func (h *Hub) newToken() string {

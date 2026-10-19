@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/kushino/realtime-arena/internal/replay"
 	"github.com/kushino/realtime-arena/internal/server"
 )
 
@@ -20,7 +21,14 @@ func main() {
 	width := flag.Int("w", 40, "arena width in cells")
 	height := flag.Int("h", 30, "arena height in cells")
 	chaosTickMs := flag.Int("chaos-tick-ms", 0, "inject N ms of latency per tick (incident drill; 0 = off)")
+	replayDir := flag.String("replay-dir", "replays", "directory for recorded matches (\"\" = memory only)")
+	replayMax := flag.Int("replay-max", 50, "number of recorded matches to keep")
 	flag.Parse()
+
+	replays, err := replay.NewStore(*replayDir, *replayMax)
+	if err != nil {
+		log.Fatalf("replay store: %v", err)
+	}
 
 	hub := server.NewHub(server.HubConfig{
 		Capacity:    *capacity,
@@ -28,6 +36,7 @@ func main() {
 		Height:      *height,
 		TickRate:    *tickRate,
 		ChaosTickMs: *chaosTickMs,
+		Replays:     replays,
 	})
 	if *chaosTickMs > 0 {
 		log.Printf("CHAOS MODE: injecting %dms latency per tick", *chaosTickMs)
@@ -36,8 +45,10 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", hub.ServeWS)
 	mux.HandleFunc("/stats", hub.ServeStats)
-	mux.HandleFunc("/metrics", hub.ServeMetrics) // Prometheus exposition
-	mux.HandleFunc("/slo", hub.ServeSLO)         // live tick-latency SLO
+	mux.HandleFunc("/metrics", hub.ServeMetrics)  // Prometheus exposition
+	mux.HandleFunc("/slo", hub.ServeSLO)          // live tick-latency SLO
+	mux.Handle("/api/replays", replays.Handler()) // recorded matches
+	mux.Handle("/api/replays/", replays.Handler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))

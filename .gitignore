@@ -11,3 +11,6 @@ coverage.out
 .DS_Store
 .idea/
 .vscode/
+
+# recorded matches (server -replay-dir)
+/replays/
