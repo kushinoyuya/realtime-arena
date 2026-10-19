@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,16 +34,36 @@ const (
 	opPong         = 0xA
 )
 
-// ErrClosed is returned by ReadMessage when the peer sent a close frame.
-var ErrClosed = errors.New("ws: connection closed by peer")
+// MaxMessageSize bounds a single frame and a reassembled message. Game
+// messages are tiny; anything larger is a misbehaving or hostile peer, and
+// without a cap a single header claiming a 2^63-byte payload would make the
+// reader allocate unbounded memory.
+const MaxMessageSize = 4096
 
-// Conn is an upgraded WebSocket connection. It is not safe for concurrent
-// writers; callers that write from multiple goroutines must serialise
-// themselves (the server does this via a single write pump per connection).
+var (
+	// ErrClosed is returned by ReadMessage when the peer sent a close frame.
+	ErrClosed = errors.New("ws: connection closed by peer")
+	// ErrTooLarge is returned when a frame or message exceeds MaxMessageSize.
+	ErrTooLarge = errors.New("ws: message too large")
+	// ErrProtocol is returned for frames that violate RFC 6455.
+	ErrProtocol = errors.New("ws: protocol error")
+)
+
+// Conn is an upgraded WebSocket connection. One goroutine may read while any
+// number write: writes are serialised by wmu, because the reader itself also
+// writes (it answers pings and echoes close frames) concurrently with the
+// server's write pump.
 type Conn struct {
 	raw    net.Conn
 	br     *bufio.Reader
 	client bool // true for the dialling side: outgoing frames must be masked
+
+	// readTimeout, if set, is re-armed before every frame read, so any frame
+	// from the peer (including a pong that ReadMessage swallows) proves it is
+	// alive.
+	readTimeout time.Duration
+
+	wmu sync.Mutex
 }
 
 // acceptKey derives the Sec-WebSocket-Accept response value from the client's
@@ -158,6 +179,11 @@ type frame struct {
 // readFrame decodes one frame from the reader, unmasking the payload if the
 // client set the mask bit (which browsers always do).
 func (c *Conn) readFrame() (frame, error) {
+	if c.readTimeout > 0 {
+		if err := c.raw.SetReadDeadline(time.Now().Add(c.readTimeout)); err != nil {
+			return frame{}, err
+		}
+	}
 	var hdr [2]byte
 	if _, err := io.ReadFull(c.br, hdr[:]); err != nil {
 		return frame{}, err
@@ -165,7 +191,13 @@ func (c *Conn) readFrame() (frame, error) {
 	fin := hdr[0]&0x80 != 0
 	opcode := hdr[0] & 0x0F
 	masked := hdr[1]&0x80 != 0
-	length := int(hdr[1] & 0x7F)
+	length := uint64(hdr[1] & 0x7F)
+
+	// RFC 6455 §5.1: every client→server frame must be masked, and the server
+	// must fail the connection otherwise.
+	if !c.client && !masked {
+		return frame{}, ErrProtocol
+	}
 
 	switch length {
 	case 126:
@@ -173,13 +205,18 @@ func (c *Conn) readFrame() (frame, error) {
 		if _, err := io.ReadFull(c.br, ext[:]); err != nil {
 			return frame{}, err
 		}
-		length = int(binary.BigEndian.Uint16(ext[:]))
+		length = uint64(binary.BigEndian.Uint16(ext[:]))
 	case 127:
 		var ext [8]byte
 		if _, err := io.ReadFull(c.br, ext[:]); err != nil {
 			return frame{}, err
 		}
-		length = int(binary.BigEndian.Uint64(ext[:]))
+		length = binary.BigEndian.Uint64(ext[:])
+	}
+	// Check before allocating; kept in uint64 so a huge length cannot wrap
+	// negative when converted to int.
+	if length > MaxMessageSize {
+		return frame{}, ErrTooLarge
 	}
 
 	var maskKey [4]byte
@@ -204,6 +241,9 @@ func (c *Conn) readFrame() (frame, error) {
 // client→server frames (c.client) must be masked with a fresh random key per
 // RFC 6455 §5.3.
 func (c *Conn) writeFrame(opcode byte, payload []byte) error {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+
 	b0 := byte(0x80) | opcode // FIN set: we never fragment outgoing messages
 	n := len(payload)
 
@@ -270,6 +310,9 @@ func (c *Conn) ReadMessage() ([]byte, error) {
 			_ = c.writeFrame(opClose, nil)
 			return nil, ErrClosed
 		case opText, opBinary, opContinuation:
+			if len(buf)+len(f.payload) > MaxMessageSize {
+				return nil, ErrTooLarge
+			}
 			buf = append(buf, f.payload...)
 			if f.fin {
 				return buf, nil
@@ -293,6 +336,15 @@ func (c *Conn) Close() error {
 // SetReadDeadline sets the read deadline on the underlying connection, used to
 // detect dead peers.
 func (c *Conn) SetReadDeadline(t time.Time) error { return c.raw.SetReadDeadline(t) }
+
+// SetReadTimeout makes every frame read fail if the peer stays silent for d.
+// Pair it with periodic Ping calls so idle-but-alive peers keep answering.
+// Must be called before reading starts.
+func (c *Conn) SetReadTimeout(d time.Duration) { c.readTimeout = d }
+
+// SetWriteDeadline bounds how long a write may block, so a peer that stops
+// reading cannot wedge the write pump forever.
+func (c *Conn) SetWriteDeadline(t time.Time) error { return c.raw.SetWriteDeadline(t) }
 
 // RemoteAddr reports the peer address, for logging.
 func (c *Conn) RemoteAddr() net.Addr { return c.raw.RemoteAddr() }

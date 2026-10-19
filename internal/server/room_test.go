@@ -13,7 +13,31 @@ import (
 // where the test can read them. This lets us exercise the full room goroutine
 // (tick loop, broadcast, matchmaking, reconnection) without opening a port,
 // which the sandbox forbids anyway.
-func fakeClient() *Client { return &Client{send: make(chan []byte, 512)} }
+func fakeClient() *Client {
+	return &Client{send: make(chan []byte, 512), done: make(chan struct{})}
+}
+
+// TestEnqueueAfterDisconnectDoesNotPanic is a regression test for a
+// "send on closed channel" panic: the room loop could call enqueue on a client
+// that had just disconnected. enqueue must stay panic-free and non-blocking even
+// after the client is done and its buffer is full.
+func TestEnqueueAfterDisconnectDoesNotPanic(t *testing.T) {
+	c := fakeClient()
+	close(c.done) // simulate the client tearing down
+
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 10000; i++ {
+			c.enqueue([]byte("x")) // must never panic or block
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("enqueue blocked after client disconnect")
+	}
+}
 
 func fastCfg() game.Config {
 	c := game.DefaultConfig(1)
@@ -114,7 +138,7 @@ func TestReconnectWithinGrace(t *testing.T) {
 	_ = readSnapshots(c, 40*time.Millisecond)
 
 	// Simulate a dropped connection.
-	r.Leave(id)
+	r.Leave(id, c)
 	time.Sleep(30 * time.Millisecond)
 
 	// Within the grace period the slot must still be reclaimable.
@@ -147,5 +171,28 @@ func TestRejoinUnknownTokenFails(t *testing.T) {
 	hub := NewHub(HubConfig{TickRate: 100})
 	if _, _, err := hub.Rejoin(fakeClient(), "does-not-exist"); err == nil {
 		t.Fatal("expected error for unknown token")
+	}
+}
+
+// TestStaleLeaveAfterRejoinKeepsNewClient is a regression test: a client whose
+// network dropped can rejoin on a new connection before the server notices the
+// old one is dead. When the old connection's disconnect finally arrives, it
+// must not mark the slot offline — the new connection owns it now.
+func TestStaleLeaveAfterRejoinKeepsNewClient(t *testing.T) {
+	r := newRoom(0, fastCfg())
+	oldConn := fakeClient()
+	id := r.addPlayer(oldConn, "p1")
+	_ = readSnapshots(oldConn, 40*time.Millisecond)
+
+	newConn := fakeClient()
+	if !r.reattach(newConn, id) {
+		t.Fatal("reattach failed")
+	}
+	r.Leave(id, oldConn) // late disconnect of the superseded connection
+	time.Sleep(30 * time.Millisecond)
+
+	_ = readSnapshots(newConn, 20*time.Millisecond) // drain pre-Leave snapshots
+	if got := readSnapshots(newConn, 100*time.Millisecond); len(got) == 0 {
+		t.Fatal("stale Leave knocked the rejoined connection offline")
 	}
 }

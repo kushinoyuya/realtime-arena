@@ -1,0 +1,36 @@
+# Multi-window burn-rate alerts for the tick-latency SLO
+# (objective: 99.9% of ticks complete under 50 ms → error budget = 0.001).
+# The same math lives, unit-tested, in internal/slo.
+groups:
+  - name: arena-slo
+    rules:
+      # Convenience recording rule: the tick "failure ratio" per window.
+      - record: arena:tick_failure_ratio:rate5m
+        expr: |
+          rate(arena_slow_ticks_total[5m]) / clamp_min(rate(arena_ticks_total[5m]), 1e-9)
+
+      # Fast burn (>14.4x over 5m AND 1h) → page: the budget is being spent in hours.
+      - alert: ArenaTickLatencyFastBurn
+        expr: |
+          (rate(arena_slow_ticks_total[5m]) / clamp_min(rate(arena_ticks_total[5m]), 1e-9)) / 0.001 > 14.4
+          and
+          (rate(arena_slow_ticks_total[1h]) / clamp_min(rate(arena_ticks_total[1h]), 1e-9)) / 0.001 > 14.4
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "Arena tick-latency SLO burning fast (>14.4x)"
+          runbook: "docs/RUNBOOK.md#tick-latency-slo-burn"
+
+      # Slow burn (>1x over 6h AND 30m) → ticket: sustained, investigate soon.
+      - alert: ArenaTickLatencySlowBurn
+        expr: |
+          (rate(arena_slow_ticks_total[30m]) / clamp_min(rate(arena_ticks_total[30m]), 1e-9)) / 0.001 > 1
+          and
+          (rate(arena_slow_ticks_total[6h]) / clamp_min(rate(arena_ticks_total[6h]), 1e-9)) / 0.001 > 1
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Arena tick-latency SLO slow burn (>1x sustained)"
+          runbook: "docs/RUNBOOK.md#tick-latency-slo-burn"
