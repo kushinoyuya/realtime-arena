@@ -4,58 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Realtime Arena</title>
-<style>
-  :root {
-    --bg: #0f1419;
-    --panel: #1a222c;
-    --grid: #1e2730;
-    --text: #e6edf3;
-    --muted: #8b98a5;
-    --accent: #4cc38a;
-    --food: #ffb454;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    background: var(--bg);
-    color: var(--text);
-    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    min-height: 100vh;
-    padding: 16px;
-  }
-  h1 { font-size: 18px; margin: 4px 0 2px; letter-spacing: .5px; }
-  .sub { color: var(--muted); margin-bottom: 12px; font-size: 12px; }
-  .wrap { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; justify-content: center; }
-  canvas {
-    background: var(--panel);
-    border-radius: 8px;
-    box-shadow: 0 8px 30px rgba(0,0,0,.4);
-    max-width: 100%;
-    height: auto;
-    image-rendering: pixelated;
-  }
-  .panel {
-    background: var(--panel);
-    border-radius: 8px;
-    padding: 14px 16px;
-    min-width: 200px;
-  }
-  .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 0 0 8px; }
-  .score { display: flex; justify-content: space-between; padding: 3px 0; }
-  .score .dot { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
-  .me { font-weight: 700; }
-  .status { margin-top: 10px; font-size: 12px; color: var(--muted); }
-  .status.live { color: var(--accent); }
-  .status.down { color: #f07178; }
-  kbd {
-    background: var(--grid); border-radius: 4px; padding: 1px 6px;
-    border: 1px solid #2b3744; font-size: 12px;
-  }
-  .hint { color: var(--muted); font-size: 12px; margin-top: 10px; }
-</style>
+<link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <h1>Realtime Arena</h1>
@@ -67,6 +16,7 @@
       <div id="scores"></div>
       <div id="status" class="status">connecting…</div>
       <div class="hint">Move: <kbd>↑</kbd><kbd>↓</kbd><kbd>←</kbd><kbd>→</kbd> or <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><br>Open more tabs to add players.</div>
+      <div class="hint"><a href="replay.html">Watch recorded matches →</a></div>
     </div>
   </div>
   <script type="module" src="app.js"></script>
