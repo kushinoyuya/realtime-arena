@@ -78,6 +78,33 @@ Move with the arrow keys or `WASD`. Eat food to grow; hitting a wall, another
 snake, or yourself ends your run. When everyone has died the round restarts
 automatically.
 
+## Replays
+
+Every finished round (the moment all snakes are dead) is recorded, and
+`http://localhost:8080/replay.html` plays any of them back with play/pause,
+step, seek and speed controls.
+
+A recording holds **only the ruleset (with the RNG seed) and the per-tick
+inputs** — a few KB — because `game.World.Step` is deterministic. On playback
+the server re-simulates the match from those inputs into frames
+(`GET /api/replays/{id}`), so the viewer draws exactly what the live game drew,
+with the same rendering code.
+
+The fingerprint of the final board is saved with the recording, and playback
+compares the re-simulated result against it. A recording whose inputs were
+altered no longer reproduces that fingerprint and is flagged **mismatch** —
+the same idea a real game backend uses to verify client-reported results
+(anti-cheat) or to reproduce a bug report from its input log.
+
+```bash
+go run ./cmd/server -replay-dir replays -replay-max 50   # defaults; -replay-dir "" = memory only
+curl localhost:8080/api/replays                          # list, newest first
+```
+
+Recordings are written off the tick loop (a slow disk never stalls the
+simulation), atomically (temp file + rename), and bounded: past `-replay-max`
+the oldest is deleted.
+
 ## Why it is built this way
 
 **Authoritative server.** The client never computes positions — it sends only
@@ -152,12 +179,13 @@ cmd/
   gifgen/     renders a demo match to docs/demo.gif via the game engine
 internal/
   game/       pure deterministic simulation + replay (no I/O)  ← most tests
+  replay/     recorded-match store, re-simulation playback, /api/replays
   protocol/   JSON messages shared by client and server
   ws/         standard-library-only WebSocket (server Upgrade + client Dial)
   server/     hub (matchmaking), room (tick loop), client, metrics wiring
   metrics/    dependency-free Prometheus-format metrics registry
   slo/        error budget + burn-rate math (Google SRE multi-window)
-web/          build-free browser client (HTML + ES-module JS + canvas)
+web/          build-free browser client (HTML + ES-module JS + canvas): live arena + replay viewer
 deploy/       prometheus.yml, alerts.yml, terraform/
 docs/         SLO.md, RUNBOOK.md, POSTMORTEM.md, demo.gif
 ```
@@ -168,7 +196,8 @@ docs/         SLO.md, RUNBOOK.md, POSTMORTEM.md, demo.gif
 |------|-----------------|
 | `internal/game` | determinism, replay reproduction, wall/self/head-to-head collisions, growth, input validation, food refill |
 | `internal/ws`   | RFC 6455 accept-key vector, frame round-trip, extended length, fragmentation, ping→pong, close |
-| `internal/server` | tick loop & broadcast, input application, reconnection within grace, matchmaking capacity/spill |
+| `internal/server` | tick loop & broadcast, input application, reconnection within grace, matchmaking capacity/spill, round-end recording |
+| `internal/replay` | playback verifies, tampered inputs are detected, records isolated from later appends, disk persist/reload/trim, API (list, get, 404, bad id, method) |
 | `internal/metrics` | counter/gauge/histogram values and Prometheus exposition format |
 | `internal/slo` | error budget, budget remaining, burn rate, multi-window alert severity |
 

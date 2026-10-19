@@ -7,6 +7,7 @@ import (
 
 	"github.com/kushino/realtime-arena/internal/game"
 	"github.com/kushino/realtime-arena/internal/protocol"
+	"github.com/kushino/realtime-arena/internal/replay"
 )
 
 // fakeClient is a Client with no socket: enqueued bytes land in its channel
@@ -194,5 +195,30 @@ func TestStaleLeaveAfterRejoinKeepsNewClient(t *testing.T) {
 	_ = readSnapshots(newConn, 20*time.Millisecond) // drain pre-Leave snapshots
 	if got := readSnapshots(newConn, 100*time.Millisecond); len(got) == 0 {
 		t.Fatal("stale Leave knocked the rejoined connection offline")
+	}
+}
+
+// TestRoundEndIsRecorded: when every snake dies the room hands the round to
+// onRoundEnd, and that record re-simulates to the same final state.
+func TestRoundEndIsRecorded(t *testing.T) {
+	cfg := fastCfg()
+	cfg.Width, cfg.Height = 10, 8 // small board: a snake hits a wall quickly
+	r := newRoom(0, cfg)
+	defer close(r.quit)
+
+	got := make(chan replay.Record, 4)
+	r.onRoundEnd = func(rec replay.Record) { got <- rec }
+	r.addPlayer(fakeClient(), "solo")
+
+	select {
+	case rec := <-got:
+		if rec.Meta.Ticks == 0 || len(rec.Meta.Players) != 1 || rec.Meta.Players[0].Name != "solo" {
+			t.Errorf("meta = %+v", rec.Meta)
+		}
+		if !replay.Play(&rec).Verified {
+			t.Error("recorded round does not re-simulate to its final state")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("round end was never recorded")
 	}
 }
