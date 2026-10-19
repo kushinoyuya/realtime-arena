@@ -1,0 +1,21 @@
+# Local observability stack: the game server plus Prometheus scraping it.
+#   docker compose up --build
+#   game   -> http://localhost:8080
+#   prom   -> http://localhost:9090   (try: arena_snapshots_sent_total)
+services:
+  arena:
+    build: .
+    ports:
+      - "8080:8080"
+    # Run the incident drill by uncommenting (watch the SLO burn in Prometheus):
+    # command: ["-addr", ":8080", "-web", "/app/web", "-chaos-tick-ms", "80"]
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/alerts.yml:/etc/prometheus/alerts.yml:ro
+    depends_on:
+      - arena

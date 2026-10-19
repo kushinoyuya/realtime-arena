@@ -21,11 +21,18 @@ type Room struct {
 	count    int32
 	seedStep int64
 
+	// Instrumentation (set by the hub; may be nil in isolated unit tests).
+	metrics *appMetrics
+
+	// chaosTickMs injects artificial per-tick latency for incident drills
+	// (see docs/RUNBOOK.md). 0 = disabled.
+	chaosTickMs int
+
 	// Inbound channels into the loop goroutine.
 	joinCh   chan joinReq
 	rejoinCh chan rejoinReq
 	inputCh  chan inputReq
-	leaveCh  chan game.PlayerID
+	leaveCh  chan leaveReq
 	quit     chan struct{}
 
 	// --- below here: touched only by loop() ---
@@ -53,6 +60,14 @@ type rejoinReq struct {
 	resp   chan bool
 }
 
+// leaveReq names the connection that went away, not just the slot: after a
+// rejoin the slot belongs to a newer connection, and the old one's late
+// disconnect must not knock it offline.
+type leaveReq struct {
+	id     game.PlayerID
+	client *Client
+}
+
 type inputReq struct {
 	id  game.PlayerID
 	dir game.Dir
@@ -65,7 +80,7 @@ func newRoom(id int, cfg game.Config) *Room {
 		joinCh:       make(chan joinReq),
 		rejoinCh:     make(chan rejoinReq),
 		inputCh:      make(chan inputReq, 256),
-		leaveCh:      make(chan game.PlayerID, 64),
+		leaveCh:      make(chan leaveReq, 64),
 		quit:         make(chan struct{}),
 		world:        game.NewWorld(cfg),
 		replay:       game.NewReplay(cfg),
@@ -107,14 +122,16 @@ func (r *Room) loop() {
 			}
 		case in := <-r.inputCh:
 			r.pendingDirs[in.id] = in.dir
-		case id := <-r.leaveCh:
+		case req := <-r.leaveCh:
 			// Disconnect: keep the snake for a grace period so a reconnecting
 			// client can reclaim it; just mark the slot offline for now.
-			if s, ok := r.offlineSince[id]; ok && s == -1 {
-				r.offlineSince[id] = r.world.Tick
+			// Ignore a stale connection whose slot was already reclaimed.
+			if cur, ok := r.clients[req.id]; !ok || cur != req.client {
+				break
 			}
-			if _, ok := r.clients[id]; ok {
-				r.clients[id] = nil
+			r.clients[req.id] = nil
+			if s, ok := r.offlineSince[req.id]; ok && s == -1 {
+				r.offlineSince[req.id] = r.world.Tick
 			}
 		case <-ticker.C:
 			r.tick()
@@ -125,6 +142,15 @@ func (r *Room) loop() {
 // tick advances the authoritative simulation by one step and broadcasts the
 // result. This is the only place the world changes.
 func (r *Room) tick() {
+	start := time.Now()
+	defer func() { r.metrics.observeTick(time.Since(start).Seconds()) }()
+
+	if r.chaosTickMs > 0 {
+		// Injected fault: makes ticks breach the latency budget so an operator
+		// can watch arena_slow_ticks_total rise and the SLO burn. Drill only.
+		time.Sleep(time.Duration(r.chaosTickMs) * time.Millisecond)
+	}
+
 	// Reap players whose grace period has expired.
 	var reaped []game.PlayerID
 	for id, since := range r.offlineSince {
@@ -205,10 +231,15 @@ func (r *Room) broadcast() {
 		Food:         r.world.Food,
 	}
 	b := protocol.MustEncode(snap)
+	sent := 0
 	for _, id := range sortedClientIDs(r.clients) {
 		if c := r.clients[id]; c != nil {
 			c.enqueue(b)
+			sent++
 		}
+	}
+	if r.metrics != nil && sent > 0 {
+		r.metrics.snapshots.Add(uint64(sent))
 	}
 }
 
@@ -251,16 +282,20 @@ func (r *Room) Input(id game.PlayerID, dir game.Dir) {
 	}
 	select {
 	case r.inputCh <- inputReq{id: id, dir: dir}:
+		if r.metrics != nil {
+			r.metrics.inputs.Inc()
+		}
 	case <-r.quit:
 	default:
 		// input buffer full under extreme load: drop (next input supersedes it)
 	}
 }
 
-// Leave marks a disconnect. Safe to call from any goroutine.
-func (r *Room) Leave(id game.PlayerID) {
+// Leave marks a disconnect of connection c from slot id. Safe to call from any
+// goroutine.
+func (r *Room) Leave(id game.PlayerID, c *Client) {
 	select {
-	case r.leaveCh <- id:
+	case r.leaveCh <- leaveReq{id: id, client: c}:
 	case <-r.quit:
 	}
 }

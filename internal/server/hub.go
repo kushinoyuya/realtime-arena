@@ -19,15 +19,17 @@ import (
 // (creating one when all rooms are full) and keeps the reconnect-token registry.
 // Rooms themselves are self-contained goroutines; the hub only routes.
 type Hub struct {
-	mu         sync.Mutex
-	rooms      []*Room
-	tokens     map[string]tokenInfo
-	cap        int32
-	nextRoomID int
-	seedSeq    int64
-	width      int
-	height     int
-	tickRate   int
+	mu          sync.Mutex
+	rooms       []*Room
+	tokens      map[string]tokenInfo
+	cap         int32
+	nextRoomID  int
+	seedSeq     int64
+	width       int
+	height      int
+	tickRate    int
+	chaosTickMs int
+	metrics     *appMetrics
 }
 
 type tokenInfo struct {
@@ -37,10 +39,11 @@ type tokenInfo struct {
 
 // HubConfig configures matchmaking and the room ruleset.
 type HubConfig struct {
-	Capacity int // players per room
-	Width    int
-	Height   int
-	TickRate int
+	Capacity    int // players per room
+	Width       int
+	Height      int
+	TickRate    int
+	ChaosTickMs int // injected per-tick latency for incident drills (0 = off)
 }
 
 // NewHub creates an empty hub. Zero-valued config fields fall back to defaults.
@@ -59,11 +62,13 @@ func NewHub(cfg HubConfig) *Hub {
 		cfg.TickRate = d.TickRate
 	}
 	return &Hub{
-		tokens:   make(map[string]tokenInfo),
-		cap:      int32(cfg.Capacity),
-		width:    cfg.Width,
-		height:   cfg.Height,
-		tickRate: cfg.TickRate,
+		tokens:      make(map[string]tokenInfo),
+		cap:         int32(cfg.Capacity),
+		width:       cfg.Width,
+		height:      cfg.Height,
+		tickRate:    cfg.TickRate,
+		chaosTickMs: cfg.ChaosTickMs,
+		metrics:     newAppMetrics(),
 	}
 }
 
@@ -83,6 +88,8 @@ func (h *Hub) Join(c *Client, name string) (*Room, game.PlayerID, string) {
 		cfg.Width, cfg.Height, cfg.TickRate = h.width, h.height, h.tickRate
 		h.seedSeq++
 		room = newRoom(h.nextRoomID, cfg)
+		room.metrics = h.metrics
+		room.chaosTickMs = h.chaosTickMs
 		h.nextRoomID++
 		h.rooms = append(h.rooms, room)
 	}
@@ -90,6 +97,7 @@ func (h *Hub) Join(c *Client, name string) (*Room, game.PlayerID, string) {
 	token := h.newToken()
 	h.mu.Unlock()
 
+	h.metrics.joins.Inc()
 	id := room.addPlayer(c, name)
 
 	h.mu.Lock()
@@ -131,7 +139,10 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "websocket upgrade required", http.StatusBadRequest)
 		return
 	}
-	NewClient(conn).run(h)
+	h.metrics.conns.Inc()
+	NewClient(conn).run(h) // blocks until the connection ends
+	h.metrics.conns.Dec()
+	h.metrics.disconnects.Inc()
 }
 
 // Stats is a point-in-time view of the hub for the /stats endpoint.

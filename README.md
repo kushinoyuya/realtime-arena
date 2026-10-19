@@ -112,19 +112,54 @@ and reports connection success, snapshot throughput, and end-to-end latency
 (p50/p90/p99) measured from a server timestamp embedded in each snapshot — a
 scaled-down version of the pre-launch load testing a game-services team does.
 
+## Operating it like an SRE
+
+Building the service is half the story; the other half is running it. This repo
+also carries the operational layer an SRE would add, all runnable locally:
+
+- **Observability.** A hand-written Prometheus exposition at `/metrics`
+  (connections, players, snapshot throughput, and an `arena_tick_duration_seconds`
+  histogram). `docker compose up --build` brings up the server *and* Prometheus
+  scraping it.
+- **SLOs & error budgets.** `internal/slo` turns raw counts into error budget,
+  budget-remaining and multi-window burn rate (Google SRE workbook thresholds),
+  unit-tested. The live tick-latency SLO is served at `/slo`; targets are in
+  [docs/SLO.md](docs/SLO.md); Prometheus burn-rate alerts in
+  [deploy/alerts.yml](deploy/alerts.yml).
+- **CI/CD & supply chain.** [GitHub Actions](.github/workflows/ci.yml) runs
+  vet + `gofmt` + race tests, **`govulncheck`**, a **CycloneDX SBOM**, and a
+  Docker build.
+- **Infrastructure as code.** A distroless [`Dockerfile`](Dockerfile) and a
+  [Terraform](deploy/terraform) module that runs the image as a managed
+  container (swap the resource for Cloud Run / Kubernetes to go to a cloud).
+- **Incident response.** A fault-injection flag (`-chaos-tick-ms`) lets you burn
+  the SLO on purpose; [docs/RUNBOOK.md](docs/RUNBOOK.md) walks the drill and
+  [docs/POSTMORTEM.md](docs/POSTMORTEM.md) is the blameless write-up.
+
+```bash
+# incident drill: inject latency, watch the SLO burn, then recover
+go run ./cmd/server -chaos-tick-ms 80
+go run ./cmd/loadtest -n 50 -dur 30s
+curl -s localhost:8080/slo      # burnRate climbs well past 14.4
+```
+
 ## Layout
 
 ```
 cmd/
-  server/     HTTP + WebSocket server; serves the client, ticks the rooms
+  server/     HTTP + WebSocket server; serves client, ticks rooms, /metrics + /slo
   loadtest/   concurrent bot-client load generator
   gifgen/     renders a demo match to docs/demo.gif via the game engine
 internal/
   game/       pure deterministic simulation + replay (no I/O)  ← most tests
   protocol/   JSON messages shared by client and server
   ws/         standard-library-only WebSocket (server Upgrade + client Dial)
-  server/     hub (matchmaking), room (tick loop), client (connection pumps)
+  server/     hub (matchmaking), room (tick loop), client, metrics wiring
+  metrics/    dependency-free Prometheus-format metrics registry
+  slo/        error budget + burn-rate math (Google SRE multi-window)
 web/          build-free browser client (HTML + ES-module JS + canvas)
+deploy/       prometheus.yml, alerts.yml, terraform/
+docs/         SLO.md, RUNBOOK.md, POSTMORTEM.md, demo.gif
 ```
 
 ## Tests
@@ -134,6 +169,8 @@ web/          build-free browser client (HTML + ES-module JS + canvas)
 | `internal/game` | determinism, replay reproduction, wall/self/head-to-head collisions, growth, input validation, food refill |
 | `internal/ws`   | RFC 6455 accept-key vector, frame round-trip, extended length, fragmentation, ping→pong, close |
 | `internal/server` | tick loop & broadcast, input application, reconnection within grace, matchmaking capacity/spill |
+| `internal/metrics` | counter/gauge/histogram values and Prometheus exposition format |
+| `internal/slo` | error budget, budget remaining, burn rate, multi-window alert severity |
 
 ## Possible next steps
 

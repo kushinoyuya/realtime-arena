@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
+	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -56,6 +58,20 @@ func maskClientFrame(fin bool, opcode byte, payload []byte) []byte {
 // the frame codec in tests.
 type fakeConn struct {
 	out bytes.Buffer
+}
+
+// lockedConn records writes like fakeConn but is safe for the concurrent
+// writers in TestConcurrentWritesDoNotInterleave; any interleaving it sees comes
+// from Conn, not from the test double.
+type lockedConn struct {
+	fakeConn
+	mu sync.Mutex
+}
+
+func (l *lockedConn) Write(b []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.out.Write(b)
 }
 
 func (f *fakeConn) Read(b []byte) (int, error)         { return 0, nil }
@@ -155,5 +171,98 @@ func TestCloseFrameReturnsErrClosed(t *testing.T) {
 	c := &Conn{raw: fc, br: bufio.NewReader(bytes.NewReader(raw))}
 	if _, err := c.ReadMessage(); err != ErrClosed {
 		t.Fatalf("expected ErrClosed, got %v", err)
+	}
+}
+
+// TestOversizedLengthRejectedBeforeAlloc sends only a header claiming a 2^62
+// byte payload. The reader must refuse it up front instead of trying to
+// allocate (an unauthenticated memory-exhaustion DoS).
+func TestOversizedLengthRejectedBeforeAlloc(t *testing.T) {
+	hdr := []byte{0x80 | opText, 0x80 | 127, 0x40, 0, 0, 0, 0, 0, 0, 0, 0xDE, 0xAD, 0xBE, 0xEF}
+	c := &Conn{br: bufio.NewReader(bytes.NewReader(hdr))}
+	if _, err := c.ReadMessage(); err != ErrTooLarge {
+		t.Fatalf("expected ErrTooLarge, got %v", err)
+	}
+}
+
+// TestFragmentedMessageCapped checks that the cap also applies to the
+// reassembled message, not only to each fragment.
+func TestFragmentedMessageCapped(t *testing.T) {
+	chunk := bytes.Repeat([]byte("x"), MaxMessageSize/2+1)
+	var raw bytes.Buffer
+	raw.Write(maskClientFrame(false, opText, chunk))
+	raw.Write(maskClientFrame(true, opContinuation, chunk))
+	c := &Conn{br: bufio.NewReader(bytes.NewReader(raw.Bytes()))}
+	if _, err := c.ReadMessage(); err != ErrTooLarge {
+		t.Fatalf("expected ErrTooLarge, got %v", err)
+	}
+}
+
+func TestUnmaskedClientFrameRejected(t *testing.T) {
+	raw := []byte{0x80 | opText, 2, 'h', 'i'} // mask bit clear
+	c := &Conn{br: bufio.NewReader(bytes.NewReader(raw))}
+	if _, err := c.ReadMessage(); err != ErrProtocol {
+		t.Fatalf("expected ErrProtocol, got %v", err)
+	}
+}
+
+// TestConcurrentWritesDoNotInterleave mirrors production: the write pump sends
+// messages while the reader answers pings. Every frame on the wire must come
+// out whole. (Under -race this also flags any unsynchronised write.)
+func TestConcurrentWritesDoNotInterleave(t *testing.T) {
+	lc := &lockedConn{}
+	c := &Conn{raw: lc}
+	payload := bytes.Repeat([]byte("s"), 300) // 16-bit length: header and body are separate writes
+
+	var wg sync.WaitGroup
+	for g := 0; g < 4; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				_ = c.WriteMessage(payload)
+				_ = c.writeFrame(opPong, []byte("p"))
+			}
+		}()
+	}
+	wg.Wait()
+
+	r := bufio.NewReader(bytes.NewReader(lc.out.Bytes()))
+	frames := 0
+	for {
+		var hdr [2]byte
+		if _, err := io.ReadFull(r, hdr[:]); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		n := int(hdr[1] & 0x7F)
+		if n == 126 {
+			var ext [2]byte
+			if _, err := io.ReadFull(r, ext[:]); err != nil {
+				t.Fatal(err)
+			}
+			n = int(binary.BigEndian.Uint16(ext[:]))
+		}
+		body := make([]byte, n)
+		if _, err := io.ReadFull(r, body); err != nil {
+			t.Fatalf("truncated frame %d: %v", frames, err)
+		}
+		switch hdr[0] & 0x0F {
+		case opText:
+			if !bytes.Equal(body, payload) {
+				t.Fatalf("frame %d: text payload corrupted", frames)
+			}
+		case opPong:
+			if string(body) != "p" {
+				t.Fatalf("frame %d: pong payload corrupted", frames)
+			}
+		default:
+			t.Fatalf("frame %d: unexpected opcode %x (interleaved bytes)", frames, hdr[0])
+		}
+		frames++
+	}
+	if frames != 4*200*2 {
+		t.Fatalf("decoded %d frames, want %d", frames, 4*200*2)
 	}
 }
