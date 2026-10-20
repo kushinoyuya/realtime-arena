@@ -203,11 +203,11 @@ func TestStaleLeaveAfterRejoinKeepsNewClient(t *testing.T) {
 func TestRoundEndIsRecorded(t *testing.T) {
 	cfg := fastCfg()
 	cfg.Width, cfg.Height = 10, 8 // small board: a snake hits a wall quickly
-	r := newRoom(0, cfg)
-	defer close(r.quit)
-
+	r := buildRoom(0, cfg)
 	got := make(chan replay.Record, 4)
 	r.onRoundEnd = func(rec replay.Record) { got <- rec }
+	go r.loop()
+	defer close(r.quit)
 	r.addPlayer(fakeClient(), "solo")
 
 	select {
