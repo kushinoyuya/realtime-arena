@@ -34,6 +34,14 @@ type Room struct {
 	// off to the replay store asynchronously. nil = recording disabled.
 	onRoundEnd func(replay.Record)
 
+	// onReap is told which players' grace period ran out, so the hub can drop
+	// their reconnect tokens. onIdle fires once the room has had no players
+	// for idleLimit ticks; the hub then decides whether to shut it down. Both
+	// are called from the loop goroutine and must not block on the room.
+	onReap    func([]game.PlayerID)
+	onIdle    func()
+	idleLimit int
+
 	// Inbound channels into the loop goroutine.
 	joinCh   chan joinReq
 	rejoinCh chan rejoinReq
@@ -53,6 +61,7 @@ type Room struct {
 	pendingDirs   map[game.PlayerID]game.Dir
 	graceTicks    int
 	roundSaved    bool // the current all-dead state has already been recorded
+	idleTicks     int  // consecutive ticks with no players
 }
 
 type joinReq struct {
@@ -80,8 +89,17 @@ type inputReq struct {
 	dir game.Dir
 }
 
+// newRoom creates a room and starts its loop.
 func newRoom(id int, cfg game.Config) *Room {
-	r := &Room{
+	r := buildRoom(id, cfg)
+	go r.loop()
+	return r
+}
+
+// buildRoom creates a room without starting its loop, so callers can set the
+// hooks above first — assigning them after `go r.loop()` would be a data race.
+func buildRoom(id int, cfg game.Config) *Room {
+	return &Room{
 		id:           id,
 		cfg:          cfg,
 		joinCh:       make(chan joinReq),
@@ -96,9 +114,8 @@ func newRoom(id int, cfg game.Config) *Room {
 		offlineSince: make(map[game.PlayerID]int),
 		pendingDirs:  make(map[game.PlayerID]game.Dir),
 		graceTicks:   cfg.TickRate * 4,
+		idleLimit:    cfg.TickRate * 10,
 	}
-	go r.loop()
-	return r
 }
 
 // loop is the single owner of all room state.
@@ -165,6 +182,14 @@ func (r *Room) tick() {
 			reaped = append(reaped, id)
 		}
 	}
+	// A board where every snake died while nobody was online is never
+	// restarted by the end-of-tick check below. If someone has come (back)
+	// since, start a fresh round now; otherwise the next recording would
+	// contain the previous round's whole history too.
+	if len(r.world.Snakes) > 0 && r.world.AliveCount() == 0 && r.onlineCount() > 0 {
+		r.restart()
+	}
+
 	// Deterministic leave order so the recorded replay reproduces exactly.
 	leaves := append([]game.PlayerID(nil), r.pendingLeaves...)
 	leaves = append(leaves, reaped...)
@@ -184,6 +209,9 @@ func (r *Room) tick() {
 		delete(r.offlineSince, id)
 		atomic.AddInt32(&r.count, -1)
 	}
+	if len(reaped) > 0 && r.onReap != nil {
+		r.onReap(reaped)
+	}
 
 	r.pendingJoins = nil
 	r.pendingLeaves = nil
@@ -197,6 +225,21 @@ func (r *Room) tick() {
 	}
 
 	r.broadcast()
+	r.checkIdle()
+}
+
+// checkIdle calls onIdle once the room has been empty for idleLimit ticks.
+// count (not the clients map) is the test because the hub reserves a slot in
+// count before the joining client reaches the loop.
+func (r *Room) checkIdle() {
+	if atomic.LoadInt32(&r.count) > 0 {
+		r.idleTicks = 0
+		return
+	}
+	r.idleTicks++
+	if r.idleTicks == r.idleLimit && r.onIdle != nil {
+		r.onIdle()
+	}
 }
 
 // recordRoundEnd hands the replay to onRoundEnd the first tick on which every

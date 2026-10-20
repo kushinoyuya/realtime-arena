@@ -127,7 +127,16 @@ spectating, and server-side verification of client-reported results.
 exclusively owns its world state; clients communicate with it only over
 channels (`internal/server/room.go`). There are no mutexes around the game
 state and nothing to race. Slow clients are handled by dropping snapshots for
-them, never by blocking the room.
+them, never by blocking the room. A room that has had no players for 10 s stops
+its goroutine and ticker, and a player's reconnect token is dropped when their
+grace period expires, so a long-running server does not accumulate idle rooms
+or dead tokens.
+
+**Origin check.** Browsers let any page open a WebSocket to any host (there is
+no CORS for WebSockets), so `/ws` rejects a browser `Origin` that is neither the
+server's own host nor listed in `-origins` (comma-separated, e.g.
+`-origins https://arena.example`). Clients that send no `Origin`, such as
+`cmd/loadtest`, are unaffected.
 
 **Hand-written WebSocket.** `internal/ws` implements the RFC 6455 handshake,
 masked/unmasked framing, fragmentation reassembly, and ping/pong/close, for both
@@ -196,7 +205,7 @@ docs/         SLO.md, RUNBOOK.md, POSTMORTEM.md, demo.gif
 |------|-----------------|
 | `internal/game` | determinism, replay reproduction, wall/self/head-to-head collisions, growth, input validation, food refill |
 | `internal/ws`   | RFC 6455 accept-key vector, frame round-trip, extended length, fragmentation, ping→pong, close |
-| `internal/server` | tick loop & broadcast, input application, reconnection within grace, matchmaking capacity/spill, round-end recording |
+| `internal/server` | tick loop & broadcast, input application, reconnection within grace, matchmaking capacity/spill, round-end recording, idle-room shutdown, token expiry, fresh round after a dead board, Origin check |
 | `internal/replay` | playback verifies, tampered inputs are detected, records isolated from later appends, disk persist/reload/trim, API (list, get, 404, bad id, method) |
 | `internal/metrics` | counter/gauge/histogram values and Prometheus exposition format |
 | `internal/slo` | error budget, budget remaining, burn rate, multi-window alert severity |
@@ -204,8 +213,7 @@ docs/         SLO.md, RUNBOOK.md, POSTMORTEM.md, demo.gif
 ## Possible next steps
 
 Client-side interpolation/prediction with server reconciliation; snapshot delta
-compression; a persisted leaderboard; a `/metrics` endpoint in Prometheus
-format; containerisation. These are deliberately left out to keep the project
+compression; a persisted leaderboard. These are deliberately left out to keep the project
 dependency-free and locally runnable.
 
 ## License

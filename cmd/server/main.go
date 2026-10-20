@@ -7,7 +7,9 @@ package main
 import (
 	"flag"
 	"log"
+	"net"
 	"net/http"
+	"strings"
 
 	"github.com/kushino/realtime-arena/internal/replay"
 	"github.com/kushino/realtime-arena/internal/server"
@@ -23,6 +25,7 @@ func main() {
 	chaosTickMs := flag.Int("chaos-tick-ms", 0, "inject N ms of latency per tick (incident drill; 0 = off)")
 	replayDir := flag.String("replay-dir", "replays", "directory for recorded matches (\"\" = memory only)")
 	replayMax := flag.Int("replay-max", 50, "number of recorded matches to keep")
+	origins := flag.String("origins", "", "comma-separated extra origins allowed to open /ws (same-origin is always allowed)")
 	flag.Parse()
 
 	replays, err := replay.NewStore(*replayDir, *replayMax)
@@ -37,6 +40,8 @@ func main() {
 		TickRate:    *tickRate,
 		ChaosTickMs: *chaosTickMs,
 		Replays:     replays,
+
+		AllowedOrigins: splitList(*origins),
 	})
 	if *chaosTickMs > 0 {
 		log.Printf("CHAOS MODE: injecting %dms latency per tick", *chaosTickMs)
@@ -57,16 +62,32 @@ func main() {
 
 	log.Printf("realtime-arena server on %s  (tick=%d/s, room cap=%d, arena=%dx%d)",
 		*addr, *tickRate, *capacity, *width, *height)
-	log.Printf("open http://localhost%s in a browser (or several tabs)", normalizeAddr(*addr))
+	log.Printf("open %s in a browser (or several tabs)", browserURL(*addr))
 	if err := http.ListenAndServe(*addr, mux); err != nil {
 		log.Fatalf("server stopped: %v", err)
 	}
 }
 
-// normalizeAddr turns ":8080" into "localhost:8080" for the convenience log line.
-func normalizeAddr(addr string) string {
-	if len(addr) > 0 && addr[0] == ':' {
-		return addr
+// browserURL turns a listen address into a URL to open locally: ":8080" and
+// "0.0.0.0:8080" become "http://localhost:8080".
+func browserURL(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "http://" + addr
 	}
-	return addr
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "localhost"
+	}
+	return "http://" + net.JoinHostPort(host, port)
+}
+
+// splitList parses a comma-separated flag value, ignoring blanks.
+func splitList(s string) []string {
+	var out []string
+	for _, f := range strings.Split(s, ",") {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
 }
