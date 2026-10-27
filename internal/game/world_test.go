@@ -144,6 +144,35 @@ func TestHeadToHead(t *testing.T) {
 	}
 }
 
+// TestHeadToHeadOnFood: two heads landing on the same food in one tick consume
+// it once. Removing it twice used to delete an uneaten food, or panic (and take
+// the whole server down) when the shared food was the last element.
+func TestHeadToHeadOnFood(t *testing.T) {
+	shared, other := Point{X: 5, Y: 5}, Point{X: 0, Y: 0}
+	for name, food := range map[string][]Point{
+		"shared food last":  {other, shared},
+		"shared food first": {shared, other},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := Config{Width: 11, Height: 11, MaxFood: 0, Seed: 1, StartLen: 1}
+			w := NewWorld(cfg)
+			w.Snakes[1] = &Snake{ID: 1, Name: "L", Body: []Point{{X: 4, Y: 5}}, Dir: DirRight, Alive: true}
+			w.Snakes[2] = &Snake{ID: 2, Name: "R", Body: []Point{{X: 6, Y: 5}}, Dir: DirLeft, Alive: true}
+			w.Food = append([]Point(nil), food...)
+
+			w.Step(dirs(map[PlayerID]Dir{1: DirRight, 2: DirLeft}))
+
+			if len(w.Food) != 1 || w.Food[0] != other {
+				t.Fatalf("expected only the uneaten food %v to remain, got %v", other, w.Food)
+			}
+			if w.Snakes[1].Alive || w.Snakes[2].Alive {
+				t.Fatalf("expected both dead in head-to-head, got alive=[%v,%v]",
+					w.Snakes[1].Alive, w.Snakes[2].Alive)
+			}
+		})
+	}
+}
+
 // TestSelfCollision: a snake long enough to loop into itself dies.
 func TestSelfCollision(t *testing.T) {
 	cfg := Config{Width: 12, Height: 12, MaxFood: 0, Seed: 1, StartLen: 1}
