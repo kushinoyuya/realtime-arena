@@ -164,11 +164,17 @@ func (w *World) move() {
 	}
 
 	// Remove eaten food (descending indices so earlier removals don't shift
-	// the ones still to delete), and bump scores.
+	// the ones still to delete), and bump scores. Two heads can land on the
+	// same food in one tick, so each index is removed only once — removing it
+	// twice would delete an uneaten food or, at the last index, panic.
 	eaten := make([]int, 0, len(ate))
+	removed := make(map[int]bool, len(ate))
 	for _, id := range ids {
 		if fi, ok := ate[id]; ok {
-			eaten = append(eaten, fi)
+			if !removed[fi] {
+				removed[fi] = true
+				eaten = append(eaten, fi)
+			}
 			w.Snakes[id].Score++
 		}
 	}
